@@ -1,0 +1,114 @@
+# Configure variables
+START_DATE     = ""
+END_DATE       = ""
+LINKAGE_METHOD = "average"
+N_CLUSTERS     = 10
+
+# Filter metadata
+import pandas as pd
+
+meta = pd.read_csv("/kaggle/input/stock-market-dataset/symbols_valid_meta.csv")
+print("Metadata columns:", meta.columns.tolist())
+
+mask = (
+    (meta['Nasdaq Traded'] == 'Y') &
+    (meta['ETF']           == 'N') &
+    (meta['Test Issue']    == 'N')
+)
+meta = meta.loc[mask].reset_index(drop=True)
+tickers = meta['Symbol'].tolist()
+print(f"Using {len(tickers)} symbols for clustering.")
+
+# Price and volume
+import os
+
+PRICE_DIRS = [
+    "/kaggle/input/stock-market-dataset/stocks",
+    "/kaggle/input/stock-market-dataset/etfs"
+]
+
+price_series  = []
+volume_series = []
+
+for pdir in PRICE_DIRS:
+    for fname in os.listdir(pdir):
+        if not fname.endswith(".csv"):
+            continue
+        symbol = os.path.splitext(fname)[0]
+        if symbol not in tickers:
+            continue
+        path = os.path.join(pdir, fname)
+        df = pd.read_csv(
+            path,
+            parse_dates=["Date"],
+            usecols=["Date", "Adj Close", "Volume"]
+        )
+        # build one‐column Series for price & volume
+        s_p = df.set_index("Date")["Adj Close"].rename(symbol)
+        s_v = df.set_index("Date")["Volume"].rename(symbol)
+        price_series.append(s_p)
+        volume_series.append(s_v)
+
+# Create dataframes
+prices  = pd.concat(price_series,  axis=1).sort_index(axis=1)
+volumes = pd.concat(volume_series, axis=1).sort_index(axis=1)
+print(f"Loaded price matrix with shape {prices.shape}")
+
+# Pre-Processing
+prices = (
+    prices
+    .dropna(thresh=len(tickers)*0.8, axis=0)
+    .ffill()
+    .dropna(axis=1)
+)
+
+returns = prices.pct_change().dropna(how="all")
+
+# Grouping by pearson correlation
+corr = returns.corr()   
+dist = 1 - corr         
+
+# Clustering
+from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
+import matplotlib.pyplot as plt
+
+Z = linkage(dist, method=LINKAGE_METHOD)
+
+plt.figure(figsize=(12,4))
+dendrogram(Z, labels=corr.columns, leaf_rotation=90)
+plt.title("Hierarchical Clustering Dendrogram")
+plt.tight_layout()
+plt.show()
+
+clusters    = fcluster(Z, t=N_CLUSTERS, criterion="maxclust")
+cluster_map = dict(zip(corr.columns, clusters))
+
+# Evaluation
+from sklearn.metrics import silhouette_score
+
+sil = silhouette_score(dist, clusters, metric="precomputed")
+print("Silhouette Score:", sil)
+
+meta['cluster'] = meta['Symbol'].map(cluster_map)
+ct = pd.crosstab(meta['cluster'], meta['Market Category'])
+print("\nCluster × Market Category:\n", ct)
+
+# Visuals
+from sklearn.decomposition import PCA
+import seaborn as sns
+
+sns.clustermap(dist, row_linkage=Z, col_linkage=Z, figsize=(10,10))
+plt.show()
+
+pca    = PCA(n_components=2)
+coords = pca.fit_transform(returns.T)
+
+plt.figure(figsize=(8,6))
+plt.scatter(coords[:,0], coords[:,1], c=clusters, s=15)
+for i, sym in enumerate(corr.columns):
+    plt.text(coords[i,0], coords[i,1], sym, fontsize=6)
+plt.title("PCA of Returns Colored by Cluster")
+plt.xlabel("PC1")
+plt.ylabel("PC2")
+plt.tight_layout()
+plt.show()
